@@ -47,7 +47,7 @@ run: |
 GDIR=$(find . -maxdepth 4 \( -name "settings.gradle*" -o -name "build.gradle*" \) ! -path "*/build/*" | head -n 1)
 [ -n "$GDIR" ] && cd "$(dirname "$GDIR")"
 ROOT=$(pwd)
-MODE="release"
+MODE=""
 [ -z "$MODE" ] && MODE="debug"
 echo "Mode pembangunan: $MODE"
 #
