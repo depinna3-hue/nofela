@@ -1,0 +1,169 @@
+name: Bangun APK Android
+on:
+workflow_dispatch:
+push:
+branches: [ main, master ]
+permissions:
+contents: write
+jobs:
+bangun:
+name: Kompilasi APK
+runs-on: ubuntu-latest
+steps:
+- name: Ambil kode sumber
+uses: actions/checkout@v4
+- name: Ekstrak ZIP proyek
+run: |
+shopt -s nullglob
+zips=(*.zip)
+if [ ${#zips[@]} -gt 0 ]; then
+for z in "${zips[@]}"; do
+echo "Mengekstrak $z ..."
+unzip -o "$z"
+done
+else
+echo "Tidak ada berkas ZIP di root repositori. Melanjutkan tanpa ekstraksi."
+fi
+- name: Pasang Java 17
+uses: actions/setup-java@v4
+with:
+distribution: temurin
+java-version: 17
+- name: Siapkan Android SDK
+uses: android-actions/setup-android@v4
+with:
+packages: ''
+- name: Pasang platform Android
+run: |
+sdkmanager
+sdkmanager
+yes | sdkmanager
+- name: Siapkan Gradle
+uses: gradle/actions/setup-gradle@v4
+with:
+gradle-version: 9.3.1
+- name: Kompilasi APK Android
+run: |
+GDIR=$(find . -maxdepth 4 \( -name "settings.gradle*" -o -name "build.gradle*" \) ! -path "*/build/*" | head -n 1)
+[ -n "$GDIR" ] && cd "$(dirname "$GDIR")"
+ROOT=$(pwd)
+MODE="release"
+[ -z "$MODE" ] && MODE="debug"
+echo "Mode pembangunan: $MODE"
+#
+mkdir -p "$ROOT/signing"
+KS=""
+for c in "$ROOT/signing/release.jks" "$ROOT/signing/release.keystore" "signing/release.jks" "signing/release.keystore"; do
+if [ -f "$c" ]; then KS="$c"; break; fi
+done
+if [ -z "$KS" ]; then
+echo "Belum ada keystore — membuat release.jks stabil di folder signing/ ..."
+keytool -genkeypair -v -storetype PKCS12 \
+-keystore "$ROOT/signing/release.jks" \
+-alias release \
+-keyalg RSA -keysize 2048 -validity 10000 \
+-storepass android123 -keypass android123 \
+-dname "CN=App Release, OU=Mobile, O=Dev, L=City, ST=ST, C=ID" \
+-noprompt
+printf '%s\n' "storePassword=android123" "keyPassword=android123" "keyAlias=release" > "$ROOT/signing/credentials.properties"
+KS="$ROOT/signing/release.jks"
+# Commit ke repo agar build berikutnya memakai tanda tangan SAMA
+git config user.name "apk-signing-bot" || true
+git config user.email "apk-signing@users.noreply.github.com" || true
+git add "$ROOT/signing/release.jks" "$ROOT/signing/credentials.properties" 2>/dev/null || git add signing/ || true
+git commit -m "Tambah keystore stabil (agar update APK memakai tanda tangan sama)" || echo "Commit keystore dilewati"
+git push || echo "Push keystore dilewati (izin/token)"
+echo "Keystore baru dibuat dan disimpan di signing/release.jks"
+fi
+if [ -n "$KS" ] && [ -f "$ROOT/signing/credentials.properties" ]; then
+set -a
+# shellcheck disable=SC1091
+. "$ROOT/signing/credentials.properties" 2>/dev/null || true
+set +a
+export KEYSTORE_FILE="$KS"
+export KEYSTORE_PASSWORD="${storePassword:-$KEYSTORE_PASSWORD}"
+export KEY_PASSWORD="${keyPassword:-$KEY_PASSWORD}"
+export KEY_ALIAS="${keyAlias:-$KEY_ALIAS}"
+echo "Memakai tanda tangan stabil: $KS (alias=${KEY_ALIAS:-release})"
+else
+echo "Peringatan: keystore tidak lengkap; release mungkin memakai debug."
+fi
+# Bangun sesuai pilihan user (Debug / Release kecil / keduanya)
+if [ "$MODE" = "release" ] || [ "$MODE" = "both" ]; then
+echo "Menjalankan assembleRelease (APK lebih ringan jika minify aktif)..."
+gradle assembleRelease
+fi
+if [ "$MODE" = "debug" ] || [ "$MODE" = "both" ]; then
+echo "Menjalankan assembleDebug..."
+gradle assembleDebug
+fi
+- name: Siapkan berkas APK
+run: |
+# Utamakan APK release (lebih kecil) jika ada
+APK_PATH=$(find . -path "*/build/outputs/apk/*/release/*.apk" -name "*.apk" 2>/dev/null | head -n 1)
+if [ -z "$APK_PATH" ]; then
+APK_PATH=$(find . -path "*/build/outputs/apk/*" -name "*.apk" | head -n 1)
+fi
+test -n "$APK_PATH" || { echo "Berkas APK tidak ditemukan!"; exit 1; }
+echo "APK dipilih: $APK_PATH ($(du -h "$APK_PATH" | cut -f1))"
+# Ambil versionCode & versionName dari app/build.gradle (bukan nomor run Actions)
+BG=$(find . -path "*/app/build.gradle" ! -path "*/build/*" | head -n 1)
+VCODE=""
+VNAME=""
+if [ -n "$BG" ] && [ -f "$BG" ]; then
+VCODE=$(grep -oE 'versionCode[[:space:]]+[0-9]+' "$BG" | head -n 1 | grep -oE '[0-9]+$')
+VNAME=$(grep -oE "versionName[[:space:]]+['\"][^'\"]+['\"]" "$BG" | head -n 1 | sed -E "s/.*['\"]([^'\"]+)['\"]/\\1/")
+fi
+if [ -z "$VCODE" ]; then VCODE="${{ github.run_number }}"; fi
+if [ -z "$VNAME" ]; then VNAME="$VCODE"; fi
+echo "VERSION_CODE=$VCODE" >> "$GITHUB_ENV"
+echo "VERSION_NAME=$VNAME" >> "$GITHUB_ENV"
+APK_FILE="nofela-v${VCODE}.apk"
+echo "APK_FILE=$APK_FILE" >> "$GITHUB_ENV"
+cp "$APK_PATH" "$APK_FILE"
+echo "Rilis memakai versionCode=$VCODE versionName=$VNAME berkas=$APK_FILE"
+# Ekspor tanda tangan (keystore) agar bisa diunduh ke HP (folder Download)
+KS_OUT=""
+CRED_OUT=""
+for c in signing/release.jks signing/release.keystore; do
+if [ -f "$c" ]; then
+KS_OUT="nofela-tanda-tangan.jks"
+cp "$c" "$KS_OUT"
+echo "KEYSTORE_FILE=$KS_OUT" >> "$GITHUB_ENV"
+break
+fi
+done
+if [ -f signing/credentials.properties ]; then
+CRED_OUT="nofela-credentials.properties"
+cp signing/credentials.properties "$CRED_OUT"
+echo "CRED_FILE=$CRED_OUT" >> "$GITHUB_ENV"
+fi
+# Daftar berkas rilis
+RELEASE_FILES="$APK_FILE"
+[ -n "$KS_OUT" ] && RELEASE_FILES="$RELEASE_FILES\n$KS_OUT"
+[ -n "$CRED_OUT" ] && RELEASE_FILES="$RELEASE_FILES\n$CRED_OUT"
+# softprops menerima multiline via env file
+{
+echo "RELEASE_FILES<<EOF"
+echo "$APK_FILE"
+[ -n "$KS_OUT" ] && echo "$KS_OUT"
+[ -n "$CRED_OUT" ] && echo "$CRED_OUT"
+echo "EOF"
+} >> "$GITHUB_ENV"
+echo "Berkas rilis: APK + keystore (jika ada)"
+- name: Simpan Artefak APK + Tanda tangan
+uses: actions/upload-artifact@v4
+with:
+name: APK-nofela-${{ env.VERSION_CODE }}
+path: |
+${{ env.APK_FILE }}
+${{ env.KEYSTORE_FILE }}
+${{ env.CRED_FILE }}
+if-no-files-found: warn
+- name: Terbitkan ke GitHub Release
+uses: softprops/action-gh-release@v2
+with:
+tag_name: v${{ env.VERSION_CODE }}
+name: Versi ${{ env.VERSION_NAME }} (code ${{ env.VERSION_CODE }})
+generate_release_notes: false
+files: ${{ env.RELEASE_FILES }}
