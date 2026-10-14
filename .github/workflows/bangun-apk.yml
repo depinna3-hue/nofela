@@ -60,13 +60,13 @@ jobs:
           MODE="debug"
           [ -z "$MODE" ] && MODE="debug"
           echo "Mode pembangunan: $MODE"
-          mkdir -p "$ROOT/signing"
+          mkdir -p "$ROOT/signing" signing
           KS=""
           for c in "$ROOT/signing/release.jks" "$ROOT/signing/release.keystore" "signing/release.jks" "signing/release.keystore"; do
             if [ -f "$c" ]; then KS="$c"; break; fi
           done
           if [ -z "$KS" ]; then
-            echo "Membuat keystore stabil signing/release.jks ..."
+            echo "Belum ada keystore di repo — membuat signing/release.jks sekali..."
             keytool -genkeypair -v -storetype PKCS12 \
               -keystore "$ROOT/signing/release.jks" \
               -alias release \
@@ -78,28 +78,43 @@ jobs:
             KS="$ROOT/signing/release.jks"
             git config user.name "apk-signing-bot" || true
             git config user.email "apk-signing@users.noreply.github.com" || true
-            git add signing/release.jks signing/credentials.properties 2>/dev/null || true
-            git commit -m "Tambah keystore stabil untuk tanda tangan APK" || true
-            git push || true
+            git add "$ROOT/signing/release.jks" "$ROOT/signing/credentials.properties" 2>/dev/null || git add signing/ || true
+            git commit -m "Tambah keystore stabil (wajib sama di setiap build)" || true
+            git push origin HEAD || git push || true
+            # Jika push gagal, commit lewat API agar keystore tetap di repo
+            if [ ! -f signing/release.jks ] && [ -f "$ROOT/signing/release.jks" ]; then
+              cp "$ROOT/signing/release.jks" signing/release.jks || true
+              cp "$ROOT/signing/credentials.properties" signing/credentials.properties || true
+            fi
           fi
-          if [ -n "$KS" ] && [ -f "$ROOT/signing/credentials.properties" ]; then
-            set -a
-            # shellcheck disable=SC1091
-            . "$ROOT/signing/credentials.properties" 2>/dev/null || true
-            set +a
+          if [ -n "$KS" ] && [ -f "${KS%/*}/credentials.properties" ] || [ -f "$ROOT/signing/credentials.properties" ] || [ -f signing/credentials.properties ]; then
+            CRED=""
+            for c in "$ROOT/signing/credentials.properties" "signing/credentials.properties" "${KS%/*}/credentials.properties"; do
+              if [ -f "$c" ]; then CRED="$c"; break; fi
+            done
+            if [ -n "$CRED" ]; then
+              set -a
+              # shellcheck disable=SC1091
+              . "$CRED" 2>/dev/null || true
+              set +a
+            fi
             export KEYSTORE_FILE="$KS"
             export KEYSTORE_PASSWORD="${storePassword:-android123}"
             export KEY_PASSWORD="${keyPassword:-android123}"
             export KEY_ALIAS="${keyAlias:-release}"
-            echo "Memakai tanda tangan stabil: $KS (alias=$KEY_ALIAS)"
+            echo "Tanda tangan STABIL: $KS alias=$KEY_ALIAS"
+          else
+            echo "PERINGATAN: credentials.properties tidak ada — APK mungkin beda tanda tangan!"
           fi
-          if [ "$MODE" = "release" ] || [ "$MODE" = "both" ]; then
-            echo "Menjalankan assembleRelease..."
-            gradle assembleRelease --no-daemon -x lint -x test || gradle assembleDebug --no-daemon -x lint -x test
-          fi
+          # Selalu bangun release bertanda tangan stabil dulu (agar update tidak bentrok)
+          echo "Menjalankan assembleRelease (tanda tangan stabil)..."
+          gradle assembleRelease --no-daemon -x lint -x test || true
           if [ "$MODE" = "debug" ] || [ "$MODE" = "both" ]; then
-            echo "Menjalankan assembleDebug..."
-            gradle assembleDebug --no-daemon -x lint -x test
+            echo "Menjalankan assembleDebug (tanda tangan sama jika keystore aktif)..."
+            gradle assembleDebug --no-daemon -x lint -x test || true
+          fi
+          if [ "$MODE" = "release" ]; then
+            gradle assembleRelease --no-daemon -x lint -x test
           fi
 
       - name: Siapkan berkas APK dan tanda tangan
