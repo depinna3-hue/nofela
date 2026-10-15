@@ -106,6 +106,29 @@ jobs:
           else
             echo "PERINGATAN: credentials.properties tidak ada — APK mungkin beda tanda tangan!"
           fi
+          # Bersihkan sisa suffix paket (.debug / .gratis / .pro) di build.gradle lama
+          echo "Membersihkan applicationIdSuffix/versionNameSuffix/productFlavors bila ada..."
+          while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            sed -i \
+              -e "s/applicationIdSuffix[[:space:]]*'[^']*'//g" \
+              -e "s/applicationIdSuffix[[:space:]]*\"[^\"]*\"//g" \
+              -e "s/versionNameSuffix[[:space:]]*'[^']*'//g" \
+              -e "s/versionNameSuffix[[:space:]]*\"[^\"]*\"//g" \
+              "$f" || true
+            # Hapus blok productFlavors & flavorDimensions (sisa template lama)
+            awk '
+              /flavorDimensions/ { skip=1; next }
+              /productFlavors[[:space:]]*\{/ { skip=1; depth=1; next }
+              skip {
+                if ($0 ~ /\{/) depth++
+                if ($0 ~ /\}/) { depth--; if (depth<=0) skip=0 }
+                next
+              }
+              { print }
+            ' "$f" > "$f.clean" 2>/dev/null && mv "$f.clean" "$f" || true
+          done < <(find . -name "build.gradle*" ! -path "*/build/*" 2>/dev/null)
+
           # Selalu bangun release bertanda tangan stabil dulu (agar update tidak bentrok)
           echo "Menjalankan assembleRelease (tanda tangan stabil)..."
           gradle assembleRelease --no-daemon -x lint -x test || true
@@ -119,9 +142,13 @@ jobs:
 
       - name: Siapkan berkas APK dan tanda tangan
         run: |
-          APK_PATH=$(find . -path "*/build/outputs/apk/*/release/*.apk" -name "*.apk" 2>/dev/null | head -n 1)
+          # Utamakan apk/release (tanpa folder flavor gratis/pro)
+          APK_PATH=$(find . -path "*/build/outputs/apk/release/*.apk" -name "*.apk" 2>/dev/null | head -n 1)
           if [ -z "$APK_PATH" ]; then
-            APK_PATH=$(find . -path "*/build/outputs/apk/*" -name "*.apk" | head -n 1)
+            APK_PATH=$(find . -path "*/build/outputs/apk/*/release/*.apk" -name "*.apk" 2>/dev/null | head -n 1)
+          fi
+          if [ -z "$APK_PATH" ]; then
+            APK_PATH=$(find . -path "*/build/outputs/apk/*" -name "*.apk" 2>/dev/null | head -n 1)
           fi
           test -n "$APK_PATH" || { echo "Berkas APK tidak ditemukan!"; exit 1; }
           echo "APK dipilih: $APK_PATH"
